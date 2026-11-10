@@ -83,6 +83,11 @@ pub mod packages;
 pub mod platform_view;
 pub mod target_platform;
 
+#[cfg(all(test, not(target_os = "android")))]
+#[path = "android/keyboard.rs"]
+#[allow(dead_code)]
+mod android_keyboard_tests;
+
 // ── System chrome (status bar / navigation bar) styling ──────────────────────
 
 /// Controls the appearance of the device status bar text and icons.

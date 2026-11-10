@@ -497,10 +497,12 @@ impl AndroidWindow {
             ));
         } else if state.renderer.is_some() {
             let raw = Self::raw_window(&native_window);
+            // The renderer keeps the present mode its first surface proved
+            // supported; Mailbox is not offered everywhere (emulator: Fifo only).
             let config = WgpuSurfaceConfig {
                 size: gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
                 transparent,
-                preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
+                preferred_present_mode: None,
             };
             let instance = state
                 .gpu_context
@@ -1032,7 +1034,7 @@ impl AndroidWindow {
     /// Returns GPU specs from the renderer, if available.
     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
         let state = self.state.lock();
-        state.renderer.as_ref().map(|r| r.gpu_specs())
+        state.renderer.as_ref().and_then(|r| r.gpu_specs())
     }
 
     /// Whether the window is currently active / visible.
@@ -1415,6 +1417,7 @@ impl PlatformWindow for AndroidPlatformWindow {
             cb(RequestFrameOptions {
                 require_presentation: false,
                 force_render: text_dirty || surface_new,
+                ..RequestFrameOptions::default()
             });
         });
     }
@@ -1541,7 +1544,8 @@ impl PlatformWindow for AndroidPlatformWindow {
                     gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
                         keystroke,
                         is_held: false,
-                        prefer_character_input: key_event.unicode_char != 0,
+                        // IME commits use text_input; physical keys check app bindings first.
+                        prefer_character_input: false,
                     })
                 } else if key_event.action == AKEY_EVENT_ACTION_UP {
                     gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke })
@@ -1869,6 +1873,12 @@ impl PlatformAtlas for FallbackAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.state.lock().tiles.remove(key);
     }
+
+    fn remove_svg(&self, path: &str) {
+        self.state.lock().tiles.retain(|key, _| {
+            !matches!(key, AtlasKey::Svg(params) if std::path::Path::new(params.path.as_ref()).starts_with(path))
+        });
+    }
 }
 
 // ── WindowList helper ─────────────────────────────────────────────────────────
@@ -2095,6 +2105,28 @@ mod tests {
     fn subpixel_aa_false_for_headless() {
         let w = AndroidWindow::headless(1080, 1920, 2.0);
         assert!(!w.supports_subpixel_aa());
+    }
+
+    #[test]
+    fn changed_mod_icons_reload_without_evicting_other_mods() {
+        let atlas = FallbackAtlas::new();
+        let key = |path: &str| AtlasKey::Svg(gpui::RenderSvgParams {
+            path: path.to_owned().into(),
+            size: gpui::size(gpui::DevicePixels(16), gpui::DevicePixels(16)),
+        });
+        let changed = key("mods/spaces/icon.svg");
+        let other = key("mods/spaces-copy/icon.svg");
+        let mut build = || Ok(Some((
+            gpui::size(gpui::DevicePixels(16), gpui::DevicePixels(16)),
+            std::borrow::Cow::Owned(vec![0; 256]),
+        )));
+        let before = atlas.get_or_insert_with(changed.clone(), &mut build).unwrap().unwrap();
+        let untouched = atlas.get_or_insert_with(other.clone(), &mut build).unwrap().unwrap();
+        atlas.remove_svg("mods/spaces");
+        let after = atlas.get_or_insert_with(changed, &mut build).unwrap().unwrap();
+        let retained = atlas.get_or_insert_with(other, &mut build).unwrap().unwrap();
+        assert_ne!(before.tile_id, after.tile_id);
+        assert_eq!(untouched.tile_id, retained.tile_id);
     }
 
     #[test]

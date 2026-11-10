@@ -329,7 +329,7 @@ pub fn android_key_to_keystroke(
 
     // Determine the character representation.
     let key_char = if unicode_char != 0 {
-        char::from_u32(unicode_char).map(|c| c.to_string())
+        char::from_u32(unicode_char).filter(|c| !c.is_control()).map(|c| c.to_string())
     } else if key.len() == 1 {
         // For single-char keys, derive the char from the key name,
         // applying shift for letters.
@@ -347,6 +347,7 @@ pub fn android_key_to_keystroke(
         modifiers,
         key,
         key_char,
+        ..Default::default()
     })
 }
 
@@ -360,6 +361,7 @@ pub fn character_to_keystroke(c: char) -> Keystroke {
         modifiers: Modifiers::default(),
         key: c.to_lowercase().to_string(),
         key_char: Some(c.to_string()),
+        ..Default::default()
     }
 }
 
@@ -369,6 +371,7 @@ pub fn backspace_keystroke() -> Keystroke {
         modifiers: Modifiers::default(),
         key: "backspace".to_string(),
         key_char: None,
+        ..Default::default()
     }
 }
 
@@ -564,6 +567,20 @@ mod tests {
         let ks = android_key_to_keystroke(AKEYCODE_ENTER, AMETA_NONE, 0).unwrap();
         assert_eq!(ks.key, "enter");
         assert_eq!(ks.key_char, None);
+    }
+
+    #[test]
+    fn control_keys_are_not_character_input() {
+        for (code, unicode) in [
+            (AKEYCODE_ESCAPE, 0x1b),
+            (AKEYCODE_TAB, 0x09),
+            (AKEYCODE_ENTER, 0x0d),
+            (AKEYCODE_DEL, 0x08),
+            (AKEYCODE_C, 0x03),
+        ] {
+            let key = android_key_to_keystroke(code, AMETA_NONE, unicode).unwrap();
+            assert_eq!(key.key_char, None, "key code {code}");
+        }
     }
 
     #[test]

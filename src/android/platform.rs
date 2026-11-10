@@ -62,12 +62,10 @@ use super::{
 };
 use gpui_wgpu::GpuContext;
 
-// ── stub: clipboard ───────────────────────────────────────────────────────────
+// ── clipboard ─────────────────────────────────────────────────────────────────
 
-/// Android clipboard (thin wrapper over `ClipboardManager` via JNI).
-///
-/// A real implementation would call into Java via `jni-rs`; for now we use
-/// an in-process string store so the rest of the platform compiles.
+/// The system clipboard, through the host Activity's `gpuiClipboardRead` and
+/// `gpuiClipboardWrite`. Hosts without them keep a copy in this process.
 #[derive(Default)]
 pub struct AndroidClipboard {
     contents: Option<String>,
@@ -75,15 +73,12 @@ pub struct AndroidClipboard {
 
 impl AndroidClipboard {
     pub fn read(&self) -> Option<String> {
-        self.contents.clone()
+        super::jni::clipboard_read().or_else(|| self.contents.clone())
     }
 
     pub fn write(&mut self, text: String) {
+        super::jni::clipboard_write(&text);
         self.contents = Some(text);
-    }
-
-    pub fn clear(&mut self) {
-        self.contents = None;
     }
 }
 
@@ -200,31 +195,6 @@ pub struct AndroidPlatform {
     should_quit: AtomicBool,
 }
 
-/// Check whether a TrueType/OpenType font file contains CBDT (Color Bitmap
-/// Data Table) tables — the bitmap emoji format that swash can render.
-///
-/// Returns `false` for COLR-only fonts (v0 or v1), SVG-only fonts, or if the
-/// file is too small / malformed to parse the table directory.
-fn font_has_cbdt_tables(data: &[u8]) -> bool {
-    // Minimum size: 12-byte offset table header.
-    if data.len() < 12 {
-        return false;
-    }
-    let num_tables = u16::from_be_bytes([data[4], data[5]]) as usize;
-    // Each table record is 16 bytes, starting at offset 12.
-    let table_dir_end = 12 + num_tables * 16;
-    if data.len() < table_dir_end {
-        return false;
-    }
-    for i in 0..num_tables {
-        let offset = 12 + i * 16;
-        if &data[offset..offset + 4] == b"CBDT" {
-            return true;
-        }
-    }
-    false
-}
-
 /// Load a file from the Android APK assets directory via the NDK
 /// `AAssetManager`.
 ///
@@ -307,11 +277,7 @@ impl AndroidPlatform {
                 "/system/fonts/NotoSansArabic-Regular.ttf",
                 "/system/fonts/NotoSansHebrew-Regular.ttf",
                 "/system/fonts/NotoSansThai-Regular.ttf",
-                // Emoji fonts — loaded so glyphs like 🦀 ✅ ❤️ render.
-                // NOTE: On Android 13+ (API 33+) the system NotoColorEmoji.ttf
-                // uses COLR v1 color outlines which swash cannot render.  We
-                // detect this below and load a bundled CBDT-based fallback
-                // instead.  The flag font is still useful regardless.
+                // The renderer also loads the full system emoji font below.
                 "/system/fonts/NotoColorEmojiFlags.ttf",
                 // Serif (fallback)
                 "/system/fonts/NotoSerif-Regular.ttf",
@@ -330,28 +296,14 @@ impl AndroidPlatform {
                 }
             }
 
-            // ── Emoji font: prefer CBDT (bitmap) over COLR v1 ───────────
-            //
-            // swash can render CBDT/CBLC bitmap emoji and COLR v0 colour
-            // outlines, but NOT COLR v1 (used by Android 13+ / API 33+).
-            // If the system font lacks CBDT tables we load a bundled
-            // CBDT-based NotoColorEmoji from the APK assets instead.
+            // GPUI 0.3.8 supports the system's bitmap and COLR emoji fonts.
             let system_emoji_path = "/system/fonts/NotoColorEmoji.ttf";
             let mut emoji_loaded = false;
 
             if let Ok(system_emoji_bytes) = std::fs::read(system_emoji_path) {
-                if font_has_cbdt_tables(&system_emoji_bytes) {
-                    log::info!(
-                        "system emoji font has CBDT tables — using it ({} bytes)",
-                        system_emoji_bytes.len()
-                    );
-                    font_data.push(std::borrow::Cow::Owned(system_emoji_bytes));
-                    emoji_loaded = true;
-                } else {
-                    log::info!(
-                        "system emoji font is COLR v1 (no CBDT) — will try bundled fallback"
-                    );
-                }
+                log::info!("loaded system emoji font ({} bytes)", system_emoji_bytes.len());
+                font_data.push(std::borrow::Cow::Owned(system_emoji_bytes));
+                emoji_loaded = true;
             }
 
             if !emoji_loaded {
@@ -1097,9 +1049,9 @@ impl Platform for AndroidPlatform {
     }
 
     fn open_url(&self, url: &str) {
-        // A full implementation would call startActivity with an ACTION_VIEW
-        // Intent via JNI.  For now, log the request.
-        log::info!("AndroidPlatform::open_url({url}) — Intent launch not yet implemented");
+        if let Err(error) = super::jni::open_url(url) {
+            log::warn!("cannot open {url}: {error}");
+        }
     }
 
     fn on_open_urls(&self, callback: Box<dyn FnMut(Vec<String>)>) {

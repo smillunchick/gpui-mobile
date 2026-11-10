@@ -48,15 +48,7 @@ pub(super) fn drain(
         }
         if event.kind == 4 {
             finish_composition(slot);
-            input(PlatformInput::KeyDown(KeyDownEvent {
-                keystroke: Keystroke {
-                    key: "escape".into(),
-                    key_char: None,
-                    modifiers: Modifiers::default(),
-                },
-                is_held: false,
-                prefer_character_input: false,
-            }));
+            input(key_down("escape"));
             continue;
         }
         // No RefCell borrow spans a GPUI update (which may replace the handler).
@@ -81,9 +73,12 @@ pub(super) fn drain(
                 handler.unmark_text();
             }
             2 | 3 => {
-                if let Some(selection) = handler.selected_text_range(false) {
-                    let mut adjusted = None;
-                    if let Some(text) = handler.text_for_range(0..usize::MAX, &mut adjusted) {
+                let selection = handler.selected_text_range(false);
+                let mut adjusted = None;
+                let text = handler.text_for_range(0..usize::MAX, &mut adjusted);
+                match (selection, text) {
+                    // A field that holds text (an editor) deletes the range itself.
+                    (Some(selection), Some(text)) if !text.is_empty() => {
                         let range = deletion_range(
                             &text,
                             selection.range,
@@ -93,15 +88,39 @@ pub(super) fn drain(
                         );
                         handler.replace_text_in_range(Some(range), "");
                     }
+                    // One with nothing to delete from (a terminal: the text lives
+                    // in its program) gets the keys, as a hardware keyboard sends.
+                    _ => {
+                        restore(slot, handler);
+                        for (key, count) in [("backspace", event.start), ("delete", event.end)] {
+                            for _ in 0..count {
+                                input(key_down(key));
+                            }
+                        }
+                        continue;
+                    }
                 }
             }
             _ => {}
         }
-        let mut current = slot.borrow_mut();
-        if current.is_none() {
-            *current = Some(handler);
-        }
+        restore(slot, handler);
     }
+}
+
+/// Puts the handler back unless a GPUI update installed a newer one.
+fn restore(slot: &Rc<RefCell<Option<PlatformInputHandler>>>, handler: PlatformInputHandler) {
+    let mut current = slot.borrow_mut();
+    if current.is_none() {
+        *current = Some(handler);
+    }
+}
+
+fn key_down(key: &str) -> PlatformInput {
+    PlatformInput::KeyDown(KeyDownEvent {
+        keystroke: Keystroke { key: key.into(), key_char: None, modifiers: Modifiers::default() },
+        is_held: false,
+        prefer_character_input: false,
+    })
 }
 
 pub(super) fn finish_composition(slot: &Rc<RefCell<Option<PlatformInputHandler>>>) {
@@ -111,10 +130,7 @@ pub(super) fn finish_composition(slot: &Rc<RefCell<Option<PlatformInputHandler>>
     let handler = slot.borrow_mut().take();
     if let Some(mut handler) = handler {
         handler.unmark_text();
-        let mut current = slot.borrow_mut();
-        if current.is_none() {
-            *current = Some(handler);
-        }
+        restore(slot, handler);
     }
     super::jni::reset_keyboard_composition();
 }

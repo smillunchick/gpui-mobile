@@ -1303,6 +1303,65 @@ pub(crate) fn restore_keyboard() {
     }
 }
 
+/// Opens a web address in the app the person chose for it (their browser).
+pub fn open_url(url: &str) -> Result<(), String> {
+    with_env(|env| {
+        let activity = activity(env)?;
+        let opened = (|| -> jni::errors::Result<()> {
+            let text = env.new_string(url)?;
+            let uri_class = env.find_class(jni::jni_str!("android/net/Uri"))?;
+            let uri = env
+                .call_static_method(&uri_class, jni::jni_str!("parse"), jni::jni_sig!("(Ljava/lang/String;)Landroid/net/Uri;"), &[JValue::Object(&text)])?
+                .l()?;
+            let action = env.new_string("android.intent.action.VIEW")?;
+            let intent = env.new_object(
+                jni::jni_str!("android/content/Intent"),
+                jni::jni_sig!("(Ljava/lang/String;Landroid/net/Uri;)V"),
+                &[JValue::Object(&action), JValue::Object(&uri)],
+            )?;
+            env.call_method(&activity, jni::jni_str!("startActivity"), jni::jni_sig!("(Landroid/content/Intent;)V"), &[JValue::Object(&intent)])?;
+            Ok(())
+        })();
+        opened.map_err(|e| {
+            env.exception_clear();
+            e.to_string()
+        })
+    })
+}
+
+/// The system clipboard's text, or `None` when the host Activity can't say.
+pub fn clipboard_read() -> Option<String> {
+    let text = with_env(|env| {
+        let activity = activity(env)?;
+        let value = env
+            .call_method(&activity, jni::jni_str!("gpuiClipboardRead"), jni::jni_sig!("()Ljava/lang/String;"), &[])
+            .and_then(|v| v.l());
+        match value {
+            Ok(object) => Ok(Some(get_string(env, &object))),
+            Err(_) => {
+                env.exception_clear();
+                Ok(None)
+            }
+        }
+    });
+    text.ok().flatten()
+}
+
+/// Puts text on the system clipboard (best effort).
+pub fn clipboard_write(text: &str) {
+    let _ = with_env(|env| {
+        let activity = activity(env)?;
+        let value = env.new_string(text).map_err(|e| e.to_string())?;
+        if env
+            .call_method(&activity, jni::jni_str!("gpuiClipboardWrite"), jni::jni_sig!("(Ljava/lang/String;)V"), &[JValue::Object(&value)])
+            .is_err()
+        {
+            env.exception_clear();
+        }
+        Ok(())
+    });
+}
+
 /// Show the UI-thread EditText proxy supplied by GpuiInputActivity.
 ///
 /// Unlike NativeActivity's key-event-only connection, its InputConnection
